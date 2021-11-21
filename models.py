@@ -3,6 +3,10 @@ import torch.optim as optim
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.data as data_utils
+from torch.nn.modules.loss import _Loss
+from torch import Tensor
+import pandas as pd
+import numpy as np
 
 class FeedForward(nn.Module):
     def __init__(self, _in: int, _out: int):
@@ -15,7 +19,7 @@ class FeedForward(nn.Module):
         x = torch.flatten(x, 1) # flatten all dimensions except batch
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        x = self.fc3(x)
+        x = torch.sigmoid(self.fc3(x))
         return x
 
 # determine the supported device
@@ -39,14 +43,15 @@ def x_y_to_dataloader(x, y, batch_size, shuffle=True):
 def train(net, x, y, epochs, batch_size=32):
     trainloader = x_y_to_dataloader(x, y, batch_size, True)
     criterion = nn.MSELoss()
-    optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
-
+    optimizer = optim.Adam(net.parameters(), lr=1e-4, weight_decay=1e-5)
+    
     for epoch in range(epochs):  # loop over the dataset multiple times
 
         running_loss = 0.0
         for i, data in enumerate(trainloader, 0):
             # get the inputs; data is a list of [inputs, labels]
             inputs, targets = data
+            targets.requires_grad = True
 
             # zero the parameter gradients
             optimizer.zero_grad()
@@ -66,6 +71,20 @@ def train(net, x, y, epochs, batch_size=32):
 
     print('Finished Training')
     
+class CorrLoss(_Loss):
+    def __init__(self) -> None:
+        super(CorrLoss, self).__init__()
+
+    def forward(self, input: Tensor, target: Tensor) -> Tensor:
+        idxs = input.argsort()
+        rank = torch.zeros_like(input)
+        idxs2 = torch.arange(start=1, end=len(input)+1)[:, None, None].type(torch.float)
+        rank[idxs] = idxs2
+        pct = rank/rank.max()
+        both = torch.stack([target, pct])
+        return 1-torch.corrcoef(both[:, :, 0])[0, 1]
+    
+    
 def eval(net, x, y, batch_size=32):
     testloader = x_y_to_dataloader(x, y, batch_size, False)
     correct = 0
@@ -82,3 +101,13 @@ def eval(net, x, y, batch_size=32):
 
     print(f'Accuracy of the network on the {len(testloader)*batch_size} test images: %d %%' % (
         100 * correct / total))
+    
+def get_corr(outputs, targets):
+    np_outputs = outputs[:, 0].detach().numpy()
+    np_targets = targets[:, 0].detach().numpy()
+
+    df_outputs = pd.DataFrame(np_outputs)
+    df_targets = pd.DataFrame(np_targets)
+    ranked_outputs = df_outputs.rank(pct=True, method="first")
+    corr = np.corrcoef(df_targets.iloc[:,0], ranked_outputs.iloc[:,0])[0, 1]
+    return corr
